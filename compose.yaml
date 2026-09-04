@@ -1,0 +1,32 @@
+name: event-trading-platform
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in your shell or .env}
+      MYSQL_DATABASE: event_trading
+    ports: ["127.0.0.1:3307:3306"]
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./src/main/resources/db/event_trading.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./src/main/resources/db/security-upgrade.sql:/docker-entrypoint-initdb.d/02-security.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      retries: 30
+  redis:
+    image: redis:7.4-alpine
+    ports: ["127.0.0.1:6380:6379"]
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: ["redis-data:/data"]
+  rabbitmq:
+    image: rabbitmq:4.1-management-alpine
+    ports: ["127.0.0.1:5673:5672", "127.0.0.1:15673:15672"]
+    environment:
+      RABBITMQ_DEFAULT_USER: event_app
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in your shell or .env}
+    volumes: ["rabbit-data:/var/lib/rabbitmq"]
+volumes:
+  mysql-data:
+  redis-data:
+  rabbit-data:

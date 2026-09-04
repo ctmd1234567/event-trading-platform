@@ -1,0 +1,6 @@
+# Explicit local demo only. Never expose this profile to a network.
+server:
+  address: 127.0.0.1
+app:
+  sms:
+    mode: local

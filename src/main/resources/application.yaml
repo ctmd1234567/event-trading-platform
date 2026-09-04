@@ -1,0 +1,65 @@
+server:
+  port: 8081
+spring:
+  config:
+    import: optional:file:.env[.properties]
+  application:
+    name: event-trading-platform
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: ${MYSQL_URL:jdbc:mysql://127.0.0.1:3306/event_trading?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true}
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:}
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 3s
+      lettuce:
+        pool:
+          max-active: 30
+          max-idle: 15
+          min-idle: 5
+          time-between-eviction-runs: 10s
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true
+    listener:
+      simple:
+        acknowledge-mode: auto
+        default-requeue-rejected: false
+        retry:
+          enabled: true
+          initial-interval: 1s
+          max-attempts: 3
+          multiplier: 2
+  servlet:
+    multipart:
+      max-file-size: 2MB
+      max-request-size: 3MB
+  jackson:
+    default-property-inclusion: non_null
+mybatis-plus:
+  type-aliases-package: com.eventplatform.entity
+logging:
+  level:
+    com.eventplatform: info
+app:
+  security:
+    admin-user-ids: ${ADMIN_USER_IDS:}
+  upload:
+    directory: ${UPLOAD_DIR:./data/images}
+  sms:
+    mode: ${SMS_MODE:disabled}
+    endpoint: ${SMS_ENDPOINT:}
+    api-key: ${SMS_API_KEY:}
+  outbox:
+    enabled: true
+    interval-ms: 1000
