@@ -197,5 +197,8 @@ event-trading-platform/
 
 - [Project goals and acceptance requirements](docs/PROJECT-REQUIREMENTS.md)
 - [Security and consistency changes](docs/SECURITY-FIXES.md)
+- [Domain model](docs/architecture/DOMAIN-MODEL.md)
+- [Business state machines](docs/architecture/STATE-MACHINES.md)
+- [API contract](docs/architecture/API-CONTRACT.md)
 
 When a roadmap item is completed, add its implementation and tests, then remove the corresponding marker from both README versions.

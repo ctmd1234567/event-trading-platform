@@ -197,5 +197,8 @@ event-trading-platform/
 
 - [项目目标与验收要求](docs/PROJECT-REQUIREMENTS.md)
 - [安全及一致性改造说明](docs/SECURITY-FIXES.md)
+- [领域模型](docs/architecture/DOMAIN-MODEL.md)
+- [业务状态机](docs/architecture/STATE-MACHINES.md)
+- [API 契约](docs/architecture/API-CONTRACT.md)
 
 每完成一项计划功能，应同步补充实现和测试，并删除中英文 README 中对应的“未实现”标记。
