@@ -1,40 +1,69 @@
 package com.eventplatform.order;
 
 import com.baomidou.mybatisplus.core.toolkit.IdWorker;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.server.ResponseStatusException;
-import org.springframework.http.HttpStatus;
-import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 
 @Service
 public class OrderTransactions {
     private final JdbcTemplate db;
-    public OrderTransactions(JdbcTemplate db) { this.db = db; }
+    private final TransactionTemplate transactions;
+
+    public OrderTransactions(JdbcTemplate db, PlatformTransactionManager transactionManager) {
+        this.db = db;
+        this.transactions = new TransactionTemplate(transactionManager);
+    }
 
     /** A durable reservation, inventory change and outgoing event share one database transaction. */
-    @Transactional
     public long reserve(long userId, long voucherId) {
-        // Serialize reservations for a voucher; the database remains the inventory authority.
-        var stocks = db.queryForList("SELECT stock, begin_time, end_time FROM tb_seckill_voucher WHERE voucher_id=? FOR UPDATE", voucherId);
-        if (stocks.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Voucher not found");
-        List<Long> existing = db.queryForList("SELECT id FROM tb_order_request WHERE user_id=? AND voucher_id=?", Long.class, userId, voucherId);
-        if (!existing.isEmpty()) return existing.getFirst();
-        existing = db.queryForList("SELECT id FROM tb_voucher_order WHERE user_id=? AND voucher_id=?", Long.class, userId, voucherId);
-        if (!existing.isEmpty()) return existing.getFirst();
+        Long existing = findExisting(userId, voucherId);
+        if (existing != null) return existing;
+        try {
+            Long reserved = transactions.execute(status -> reserveNew(userId, voucherId));
+            if (reserved == null) throw new IllegalStateException("Reservation transaction returned no order id");
+            return reserved;
+        } catch (DuplicateKeyException duplicate) {
+            // Concurrent retries can both pass the fast read. The losing transaction rolls back
+            // its stock decrement before this lookup returns the winner's durable request id.
+            existing = findExisting(userId, voucherId);
+            if (existing != null) return existing;
+            throw duplicate;
+        }
+    }
+
+    private long reserveNew(long userId, long voucherId) {
+        // The conditional update is the only hot-row operation. Do not hold its lock while
+        // performing idempotency reads; MySQL is still the authoritative inventory store.
+        long id = IdWorker.getId();
+        db.update("INSERT INTO tb_order_request(id,user_id,voucher_id,state) VALUES (?,?,?,'PENDING')", id,userId,voucherId);
+        db.update("INSERT INTO tb_outbox_event(id,next_attempt) VALUES (?,CURRENT_TIMESTAMP)", id);
         int changed = db.update("""
             UPDATE tb_seckill_voucher SET stock=stock-1
             WHERE voucher_id=? AND stock>0 AND begin_time<=CURRENT_TIMESTAMP AND end_time>CURRENT_TIMESTAMP
             AND EXISTS (SELECT 1 FROM tb_voucher WHERE id=? AND status=1)
             """, voucherId, voucherId);
-        if (changed != 1) throw new ResponseStatusException(HttpStatus.CONFLICT, "The sale is unavailable, ended, or out of stock");
-        long id = IdWorker.getId();
-        db.update("INSERT INTO tb_order_request(id,user_id,voucher_id,state) VALUES (?,?,?,'PENDING')", id,userId,voucherId);
-        db.update("INSERT INTO tb_outbox_event(id,next_attempt) VALUES (?,CURRENT_TIMESTAMP)", id);
+        if (changed != 1) {
+            Integer present = db.queryForObject("SELECT COUNT(*) FROM tb_seckill_voucher WHERE voucher_id=?", Integer.class, voucherId);
+            if (present == null || present == 0) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Voucher not found");
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "The sale is unavailable, ended, or out of stock");
+        }
         return id;
+    }
+
+    private Long findExisting(long userId, long voucherId) {
+        List<Long> existing = db.queryForList("SELECT id FROM tb_order_request WHERE user_id=? AND voucher_id=?", Long.class, userId, voucherId);
+        if (!existing.isEmpty()) return existing.getFirst();
+        existing = db.queryForList("SELECT id FROM tb_voucher_order WHERE user_id=? AND voucher_id=?", Long.class, userId, voucherId);
+        if (!existing.isEmpty()) return existing.getFirst();
+        return null;
     }
 
     /** Lock and state check make redelivery a no-op; commit before acknowledging the message. */

@@ -2,20 +2,18 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-基于 Java 21、Spring Boot、MySQL、Redis 和 RabbitMQ 构建的高并发交易后端。
-项目以限时抢购为核心场景，重点解决库存正确性、重复请求、可靠消息投递和异步订单一致性问题。
-
-> 当前版本已经完成可运行的优惠券抢购链路；活动、场次、支付和退款等完整交易领域仍在重构中，未完成能力均明确标记为“（未实现）”。
+基于 Java 21、Spring Boot、MySQL、Redis 和 RabbitMQ 构建的高并发交易后端。项目以限时抢购为核心场景，重点解决库存正确性、重复请求、流量保护、可靠消息投递和异步订单一致性问题。
 
 ## 项目亮点
 
-- **数据库作为交易事实源**：库存条件扣减与行锁共同避免超卖，不依赖 Redis 保存最终交易状态。
+- **MySQL 交易事实源**：条件扣减库存，使用唯一约束防止同一用户重复下单，Redis 不保存最终交易状态。
+- **短事务热点控制**：幂等查询位于事务外，库存条件更新在事务末尾执行，缩短热点库存行的持锁时间。
 - **可靠异步订单**：库存预留、请求记录和 Outbox 事件在同一事务中提交。
-- **消息最终一致性**：RabbitMQ Confirm、持久化消息、消费端幂等、失败队列和 Outbox 重试共同处理异常。
+- **消息最终一致性**：RabbitMQ Confirm、持久化消息、消费端幂等、失败队列和 Outbox 重试覆盖异常路径。
 - **请求幂等**：同一用户重复提交同一抢购请求时返回同一个请求 ID，不重复扣减库存。
+- **分层流量控制**：一次 Redis Lua 调用完成用户、单商品和全局三级准入检查。
 - **安全边界**：Token 鉴权、管理员权限、验证码原子消费、接口限流和请求结束身份清理。
-- **缓存治理**：支持空值缓存、逻辑过期、异步刷新、锁所有权校验和事务提交后失效。
-- **自动化验证**：包含 22 项默认测试，以及基于 Testcontainers 的真实基础设施集成测试。
+- **自动化验证**：包含 24 项默认测试、真实依赖集成测试和可复现的 k6 写链路压测。
 
 ## 技术栈
 
@@ -23,30 +21,31 @@
 - Spring Security、MyBatis-Plus
 - MySQL 8、Redis、RabbitMQ
 - Maven、Docker Compose
-- JUnit 5、H2、Mockito、Testcontainers
+- JUnit 5、H2、Mockito、Testcontainers、k6
 
 ## 核心订单链路
 
 ```mermaid
 flowchart TD
-  A[用户提交抢购请求] --> B{已有请求或订单}
-  B -- 是 --> C[返回原请求 ID]
-  B -- 否 --> D[事务锁定库存并校验活动状态]
-  D --> E[扣减库存并写入 PENDING 请求与 Outbox]
-  E --> F[提交事务并返回请求 ID]
+  A[用户提交抢购请求] --> B[Redis Lua 三级流量准入]
+  B --> C{已有请求或订单}
+  C -- 是 --> D[返回原请求 ID]
+  C -- 否 --> E[事务写入 PENDING 请求与 Outbox]
+  E --> F[条件扣减 MySQL 库存]
+  F --> G[提交事务并返回请求 ID]
 
-  G[Outbox 定时扫描] --> H[发布持久消息并等待 Broker Confirm]
-  H -- 失败或退回 --> I[记录错误并延迟重试]
-  I --> G
-  H -- 已确认 --> J[RabbitMQ 消费者]
-  J --> K[事务锁定请求并幂等创建订单]
-  K --> L[请求与 Outbox 标记完成]
-  L --> M[事务提交后 ACK]
-  J -- 重试耗尽 --> N[失败队列]
-  H -- 超时仍未完成 --> G
+  H[Outbox 批量扫描并租约事件] --> I[整批发布持久消息]
+  I --> J[等待 Broker Confirm]
+  J -- 失败或退回 --> K[记录错误并延迟重试]
+  K --> H
+  J -- 已确认 --> L[RabbitMQ 并发消费者]
+  L --> M[事务锁定请求并幂等创建订单]
+  M --> N[请求与 Outbox 标记完成]
+  N --> O[事务提交后 ACK]
+  L -- 重试耗尽 --> P[失败队列]
 ```
 
-Broker Confirm 只代表消息已被 RabbitMQ 接收。只有消费者事务完成后，数据库中的 Outbox 事件才会被标记为完成；因此即使发生重复投递，也不会重复创建订单。
+Broker Confirm 只代表 RabbitMQ 已接收消息。消费者事务完成后，数据库中的 Outbox 事件才会被标记为完成；重复投递不会重复创建订单。
 
 ## 已实现功能
 
@@ -62,30 +61,18 @@ Broker Confirm 只代表消息已被 RabbitMQ 接收。只有消费者事务完�
 
 - 优惠券及限时抢购。
 - 数据库条件扣减库存。
-- 用户与资源维度的重复请求保护。
+- 用户、单商品和全局三级流量准入。
+- 同一用户、同一优惠券的请求幂等。
 - 订单请求状态查询：`PENDING`、`COMPLETED`。
-- Transactional Outbox 及定时补发。
-- RabbitMQ 持久化、Confirm、Return、消费重试和失败队列。
+- Transactional Outbox 批量发布和定时补发。
+- RabbitMQ 持久化、Confirm、Return、并发消费、重试和失败队列。
 
-### 缓存与现有业务
+### 缓存与业务功能
 
 - 商户查询缓存、空值缓存和逻辑过期。
 - 商户分类查询。
 - 笔记、点赞、关注和签到。
 - 图片上传、读取和删除。
-
-现有商户、笔记、关注和签到代码属于过渡业务，后续将随活动交易领域落地逐步移除。
-
-## 计划功能
-
-- 活动、场次、商品和票档模型（未实现）。
-- 活动发布、上下架和状态流转（未实现）。
-- 支付、支付回调和超时关单（未实现）。
-- 取消订单、退款和库存补偿（未实现）。
-- WebSocket 或 SSE 实时通知（未实现）。
-- 监控指标、链路追踪和自动告警（未实现）。
-- 可复现的并发压测脚本和性能报告（未实现）。
-- 生产环境部署编排（未实现）。
 
 ## 快速启动
 
@@ -131,20 +118,7 @@ mvn test
 mvn '-Dspring-boot.run.profiles=local' spring-boot:run
 ```
 
-服务地址：`http://127.0.0.1:8081`。
-
-`local` profile 会返回开发验证码，只能用于本机调试，禁止暴露到公网。
-
-### 4. 验证登录
-
-```powershell
-$phone = '13900000001'
-$sent = Invoke-RestMethod -Method Post "http://127.0.0.1:8081/user/code?phone=$phone"
-$body = @{ phone=$phone; code=$sent.data.developmentCode } | ConvertTo-Json
-$login = Invoke-RestMethod -Method Post 'http://127.0.0.1:8081/user/login' -ContentType 'application/json' -Body $body
-$headers = @{ authorization=$login.data }
-Invoke-RestMethod 'http://127.0.0.1:8081/user/me' -Headers $headers
-```
+服务地址：`http://127.0.0.1:8081`。`local` profile 会返回开发验证码，只能用于本机调试。
 
 ## 测试
 
@@ -154,7 +128,7 @@ Invoke-RestMethod 'http://127.0.0.1:8081/user/me' -Headers $headers
 mvn test
 ```
 
-当前默认测试结果：**22 项通过，0 失败**。
+当前默认测试结果：**24 项通过，0 失败**。
 
 使用真实 MySQL、Redis 和 RabbitMQ 运行隔离集成测试：
 
@@ -162,7 +136,29 @@ mvn test
 mvn -Pinfrastructure verify
 ```
 
-该命令需要 Docker；它与性能压测不是同一种检查。
+## 并发压测
+
+`loadtest/` 包含真实下单固定到达率脚本、隔离优惠券数据和自动过期的合成用户令牌。准备隔离数据后可执行：
+
+```powershell
+$env:RATE='415'
+$env:DURATION_SECONDS='10'
+$env:VOUCHER_ID='9900010415'
+$env:BASE_URL='http://127.0.0.1:8081'
+k6 run .\loadtest\order-capacity.js
+```
+
+本地单实例测试环境：Windows 11、Java 21、Docker MySQL 8.4、Redis 7.4、RabbitMQ 4.1、k6 v2.2.0。每次请求调用真实鉴权下单接口并使用不同合成用户；测试后核对库存、请求、最终订单、重复订单和 Outbox。
+
+10 秒固定到达率结果：
+
+- 400 目标 RPS：P95 336.31 ms，0 非预期响应，0 dropped iterations。
+- 410 目标 RPS：P95 587.7 ms，0 非预期响应，0 dropped iterations。
+- 415 目标 RPS：P95 714.23 ms，4150 个请求全部成功，库存 0、最终订单 4150、重复订单 0、Outbox 积压 0。
+- 425 目标 RPS：P95 912.92 ms，出现 1 次数据库连接池超时。
+- 450 目标 RPS：P95 1.94 s，102 个 dropped iterations、4 次数据库连接池超时。
+
+按 P95 小于 1 秒、无非预期响应、无 dropped iteration 和数据一致性校验的口径，当前已验证稳定档位为 415 目标 RPS，失败边界位于 415～425 目标 RPS。该结果是本地单实例、10 秒短时容量基线，不代表生产环境 SLA。
 
 ## 项目结构
 
@@ -179,26 +175,23 @@ event-trading-platform/
 │  ├─ db/              # 建库及升级脚本
 │  └─ mapper/          # MyBatis XML
 ├─ src/test/           # 单元、回归和集成测试
-├─ docs/               # 需求与技术说明
+├─ docs/               # 架构与技术说明
+├─ loadtest/           # k6 写链路压测与隔离数据
 ├─ postman/            # API 请求集合
 ├─ compose.yaml
 └─ pom.xml
 ```
 
-## 设计边界
+## 运行边界
 
-- 当前实现优先保证一致性，没有宣称达到生产级吞吐量。
-- 热点库存会在数据库行锁位置串行化。
-- 抢购接口返回的是请求 ID，不代表订单已经完成落库。
-- 当前未实现支付、退款和库存自动释放，订单状态不明确时不能手工增加库存。
-- 本地 Compose 仅用于开发，不代表生产部署方案。
+- MySQL 是库存和订单的最终事实源；Redis 用于缓存、会话和流量准入。
+- 同一商品的库存更新仍会在单条 MySQL 记录上串行化。
+- 抢购接口返回请求 ID，最终订单由 RabbitMQ 消费者异步创建。
+- 本地 Compose 用于开发和验证，不代表生产部署环境。
 
 ## 相关文档
 
-- [项目目标与验收要求](docs/PROJECT-REQUIREMENTS.md)
-- [安全及一致性改造说明](docs/SECURITY-FIXES.md)
+- [安全及一致性说明](docs/SECURITY-FIXES.md)
 - [领域模型](docs/architecture/DOMAIN-MODEL.md)
 - [业务状态机](docs/architecture/STATE-MACHINES.md)
 - [API 契约](docs/architecture/API-CONTRACT.md)
-
-每完成一项计划功能，应同步补充实现和测试，并删除中英文 README 中对应的“未实现”标记。

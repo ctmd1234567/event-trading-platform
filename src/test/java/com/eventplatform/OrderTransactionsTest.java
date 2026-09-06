@@ -21,7 +21,7 @@ class OrderTransactionsTest {
         @Bean DataSource dataSource() { return new DriverManagerDataSource("jdbc:h2:mem:orders;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000","sa",""); }
         @Bean JdbcTemplate db(DataSource source) { return new JdbcTemplate(source); }
         @Bean PlatformTransactionManager transactionManager(DataSource source) { return new DataSourceTransactionManager(source); }
-        @Bean OrderTransactions orders(JdbcTemplate db) { return new OrderTransactions(db); }
+        @Bean OrderTransactions orders(JdbcTemplate db, PlatformTransactionManager transactionManager) { return new OrderTransactions(db, transactionManager); }
     }
     @org.springframework.beans.factory.annotation.Autowired OrderTransactions orders;
     @org.springframework.beans.factory.annotation.Autowired JdbcTemplate db;

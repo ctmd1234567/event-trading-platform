@@ -25,7 +25,7 @@ public class VoucherOrderController {
     private IVoucherOrderService voucherOrderService;
     @PostMapping("seckill/{id}")
     public Result seckillVoucher(@PathVariable("id") Long voucherId) {
-        limits.order(com.eventplatform.utils.UserHolder.getUser().getId());
+        limits.order(com.eventplatform.utils.UserHolder.getUser().getId(), voucherId);
         return voucherOrderService.seckillVoucher(voucherId);
     }
 }

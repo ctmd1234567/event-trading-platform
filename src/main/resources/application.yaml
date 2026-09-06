@@ -1,6 +1,16 @@
 server:
   port: 8081
+  shutdown: graceful
+  tomcat:
+    threads:
+      max: ${TOMCAT_MAX_THREADS:300}
+      min-spare: ${TOMCAT_MIN_SPARE_THREADS:20}
+    accept-count: ${TOMCAT_ACCEPT_COUNT:2000}
+    max-connections: ${TOMCAT_MAX_CONNECTIONS:10000}
+    connection-timeout: 5s
 spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
   config:
     import: optional:file:.env[.properties]
   application:
@@ -10,6 +20,12 @@ spring:
     url: ${MYSQL_URL:jdbc:mysql://127.0.0.1:3306/event_trading?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true}
     username: ${MYSQL_USER:root}
     password: ${MYSQL_PASSWORD:}
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:20}
+      minimum-idle: ${DB_POOL_MIN_IDLE:10}
+      connection-timeout: 3000
+      validation-timeout: 1000
+      max-lifetime: 1800000
   data:
     redis:
       host: ${REDIS_HOST:127.0.0.1}
@@ -35,6 +51,9 @@ spring:
       simple:
         acknowledge-mode: auto
         default-requeue-rejected: false
+        concurrency: ${RABBIT_CONSUMERS:4}
+        max-concurrency: ${RABBIT_MAX_CONSUMERS:16}
+        prefetch: ${RABBIT_PREFETCH:50}
         retry:
           enabled: true
           initial-interval: 1s
@@ -60,6 +79,17 @@ app:
     mode: ${SMS_MODE:disabled}
     endpoint: ${SMS_ENDPOINT:}
     api-key: ${SMS_API_KEY:}
+  order:
+    rate-limit:
+      user-max: ${ORDER_USER_RATE_MAX:10}
+      user-window-seconds: ${ORDER_USER_RATE_WINDOW_SECONDS:10}
+      voucher-max: ${ORDER_VOUCHER_RATE_MAX:1000}
+      voucher-window-seconds: ${ORDER_VOUCHER_RATE_WINDOW_SECONDS:1}
+      global-max: ${ORDER_GLOBAL_RATE_MAX:3000}
+      global-window-seconds: ${ORDER_GLOBAL_RATE_WINDOW_SECONDS:1}
   outbox:
     enabled: true
-    interval-ms: 1000
+    interval-ms: ${OUTBOX_INTERVAL_MS:250}
+    batch-size: ${OUTBOX_BATCH_SIZE:200}
+    lease-seconds: ${OUTBOX_LEASE_SECONDS:60}
+    confirm-timeout-seconds: ${OUTBOX_CONFIRM_TIMEOUT_SECONDS:5}
