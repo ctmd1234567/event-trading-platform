@@ -10,12 +10,16 @@ import com.eventplatform.service.ISeckillVoucherService;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import com.eventplatform.order.StockBuckets;
 
 @Service
 public class VoucherServiceImpl extends ServiceImpl<VoucherMapper,Voucher> implements IVoucherService {
     private final ISeckillVoucherService seckill;
     private final JdbcTemplate db;
-    public VoucherServiceImpl(ISeckillVoucherService seckill,JdbcTemplate db) { this.seckill=seckill; this.db=db; }
+    private final StockBuckets stockBuckets;
+    public VoucherServiceImpl(ISeckillVoucherService seckill,JdbcTemplate db,StockBuckets stockBuckets) {
+        this.seckill=seckill; this.db=db; this.stockBuckets=stockBuckets;
+    }
     @Override public Result queryVoucherOfShop(Long shopId) { return Result.ok(getBaseMapper().queryVoucherOfShop(shopId)); }
     public static void validate(Voucher voucher,boolean flashSale) {
         if(voucher.getId()!=null || voucher.getShopId()==null || voucher.getShopId()<=0
@@ -37,6 +41,7 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper,Voucher> imple
         stock.setVoucherId(voucher.getId()); stock.setStock(voucher.getStock());
         stock.setBeginTime(voucher.getBeginTime()); stock.setEndTime(voucher.getEndTime());
         if(!seckill.save(stock)) throw new IllegalStateException("Stock insert failed");
+        stockBuckets.initialize(voucher.getId(), voucher.getStock());
         // Inventory is authoritative in MySQL; no non-transactional Redis pre-decrement.
     }
     @Override @Transactional

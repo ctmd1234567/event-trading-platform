@@ -1,4 +1,4 @@
-for index=1,12000 do
+for index=1,20000 do
   local token=string.format('%032x',index)
   local userId=9100000+index
   local key='login:token:' .. token
@@ -11,6 +11,11 @@ redis.call('DEL','order:voucher:{9900010250}')
 redis.call('DEL','order:voucher:{9900010300}')
 redis.call('DEL','order:voucher:{9900010350}')
 redis.call('DEL','order:voucher:{9900010400}')
+redis.call('DEL','order:voucher:{9900020800}')
+redis.call('DEL','order:voucher:{9900021000}')
+redis.call('DEL','order:voucher:{9900021200}')
+redis.call('DEL','order:voucher:{9900021600}')
+redis.call('DEL','order:voucher:{9900021800}')
 redis.call('DEL','order:global')
 
-return 12000
+return 20000

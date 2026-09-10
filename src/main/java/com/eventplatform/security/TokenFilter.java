@@ -10,24 +10,39 @@ import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.filter.OncePerRequestFilter;
 import java.io.IOException;
-import java.time.Duration;
 import java.util.*;
 
 public class TokenFilter extends OncePerRequestFilter {
+    private static final DefaultRedisScript<List> READ_SESSION = sessionScript();
     private final StringRedisTemplate redis;
     private final Set<String> admins;
     private final ObjectMapper json;
-    public TokenFilter(StringRedisTemplate redis, String adminIds, ObjectMapper json) {
+    private final int sessionTtlSeconds;
+    private final int refreshThresholdSeconds;
+
+    private static DefaultRedisScript<List> sessionScript() {
+        DefaultRedisScript<List> script = new DefaultRedisScript<>();
+        script.setLocation(new ClassPathResource("auth-session.lua"));
+        script.setResultType(List.class);
+        return script;
+    }
+
+    public TokenFilter(StringRedisTemplate redis, String adminIds, ObjectMapper json,
+            int sessionTtlSeconds, int refreshThresholdSeconds) {
         this.redis = redis;
         this.admins = new HashSet<>(Arrays.asList(adminIds.trim().split("\\s*,\\s*")));
         this.json = json;
+        this.sessionTtlSeconds = Math.max(1, sessionTtlSeconds);
+        this.refreshThresholdSeconds = Math.max(1, Math.min(refreshThresholdSeconds, this.sessionTtlSeconds));
     }
     public static String token(HttpServletRequest request) {
         String value = request.getHeader("authorization");
@@ -45,10 +60,15 @@ public class TokenFilter extends OncePerRequestFilter {
                 String token = token(req);
                 if (token != null) {
                     String key = RedisConstants.LOGIN_USER_KEY + token;
-                    Map<Object, Object> data = redis.opsForHash().entries(key);
-                    if (!data.isEmpty()) {
+                    List<?> values = redis.execute(READ_SESSION, List.of(key),
+                            String.valueOf(sessionTtlSeconds), String.valueOf(refreshThresholdSeconds));
+                    if (values != null && !values.isEmpty()) {
+                        Map<String, String> data = new HashMap<>(values.size() / 2);
+                        for (int index = 0; index + 1 < values.size(); index += 2) {
+                            data.put(String.valueOf(values.get(index)), String.valueOf(values.get(index + 1)));
+                        }
                         UserDTO user = BeanUtil.fillBeanWithMap(data, new UserDTO(), false);
-                        if (user.getId() != null && Boolean.TRUE.equals(redis.expire(key, Duration.ofMinutes(30)))) {
+                        if (user.getId() != null) {
                             var roles = new ArrayList<SimpleGrantedAuthority>();
                             roles.add(new SimpleGrantedAuthority("ROLE_USER"));
                             if (admins.contains(user.getId().toString())) roles.add(new SimpleGrantedAuthority("ROLE_ADMIN"));

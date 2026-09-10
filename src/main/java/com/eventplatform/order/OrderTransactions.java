@@ -11,19 +11,32 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.server.ResponseStatusException;
 import java.util.List;
 import java.util.Map;
+import java.util.Collections;
+import java.sql.Timestamp;
+import java.time.Duration;
+import java.time.Instant;
 
 @Service
 public class OrderTransactions {
     private final JdbcTemplate db;
     private final TransactionTemplate transactions;
+    private final StockBuckets stockBuckets;
+    private final OrderPerformance performance;
 
-    public OrderTransactions(JdbcTemplate db, PlatformTransactionManager transactionManager) {
+    public OrderTransactions(JdbcTemplate db, PlatformTransactionManager transactionManager,
+            StockBuckets stockBuckets, OrderPerformance performance) {
         this.db = db;
         this.transactions = new TransactionTemplate(transactionManager);
+        this.stockBuckets = stockBuckets;
+        this.performance = performance;
     }
 
     /** A durable reservation, inventory change and outgoing event share one database transaction. */
     public long reserve(long userId, long voucherId) {
+        return performance.protect(() -> reserveProtected(userId, voucherId));
+    }
+
+    private long reserveProtected(long userId, long voucherId) {
         Long existing = findExisting(userId, voucherId);
         if (existing != null) return existing;
         try {
@@ -40,28 +53,21 @@ public class OrderTransactions {
     }
 
     private long reserveNew(long userId, long voucherId) {
-        // The conditional update is the only hot-row operation. Do not hold its lock while
-        // performing idempotency reads; MySQL is still the authoritative inventory store.
         long id = IdWorker.getId();
-        db.update("INSERT INTO tb_order_request(id,user_id,voucher_id,state) VALUES (?,?,?,'PENDING')", id,userId,voucherId);
+        int bucket = stockBuckets.reserve(userId, voucherId);
+        db.update("INSERT INTO tb_order_request(id,user_id,voucher_id,stock_bucket,state) VALUES (?,?,?,?,'PENDING')",
+                id,userId,voucherId,bucket);
         db.update("INSERT INTO tb_outbox_event(id,next_attempt) VALUES (?,CURRENT_TIMESTAMP)", id);
-        int changed = db.update("""
-            UPDATE tb_seckill_voucher SET stock=stock-1
-            WHERE voucher_id=? AND stock>0 AND begin_time<=CURRENT_TIMESTAMP AND end_time>CURRENT_TIMESTAMP
-            AND EXISTS (SELECT 1 FROM tb_voucher WHERE id=? AND status=1)
-            """, voucherId, voucherId);
-        if (changed != 1) {
-            Integer present = db.queryForObject("SELECT COUNT(*) FROM tb_seckill_voucher WHERE voucher_id=?", Integer.class, voucherId);
-            if (present == null || present == 0) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Voucher not found");
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "The sale is unavailable, ended, or out of stock");
-        }
         return id;
     }
 
     private Long findExisting(long userId, long voucherId) {
-        List<Long> existing = db.queryForList("SELECT id FROM tb_order_request WHERE user_id=? AND voucher_id=?", Long.class, userId, voucherId);
-        if (!existing.isEmpty()) return existing.getFirst();
-        existing = db.queryForList("SELECT id FROM tb_voucher_order WHERE user_id=? AND voucher_id=?", Long.class, userId, voucherId);
+        // One query covers both the durable request and legacy/final order paths. New buyers no
+        // longer pay a second database round-trip when neither row exists.
+        List<Long> existing = db.queryForList("""
+            SELECT id FROM tb_order_request WHERE user_id=? AND voucher_id=?
+            UNION ALL SELECT id FROM tb_voucher_order WHERE user_id=? AND voucher_id=? LIMIT 1
+            """, Long.class, userId, voucherId, userId, voucherId);
         if (!existing.isEmpty()) return existing.getFirst();
         return null;
     }
@@ -69,15 +75,43 @@ public class OrderTransactions {
     /** Lock and state check make redelivery a no-op; commit before acknowledging the message. */
     @Transactional
     public void fulfill(long id) {
-        var requests = db.queryForList("SELECT user_id,voucher_id,state FROM tb_order_request WHERE id=? FOR UPDATE", id);
-        if (requests.isEmpty()) throw new IllegalArgumentException("Unknown order request");
-        Map<String,Object> request = requests.getFirst();
-        if ("COMPLETED".equals(request.get("state"))) return;
-        long user = ((Number) request.get("user_id")).longValue();
-        long voucher = ((Number) request.get("voucher_id")).longValue();
-        db.update("INSERT INTO tb_voucher_order(id,user_id,voucher_id) VALUES (?,?,?)", id,user,voucher);
-        db.update("UPDATE tb_order_request SET state='COMPLETED',updated_at=CURRENT_TIMESTAMP WHERE id=?", id);
-        db.update("UPDATE tb_outbox_event SET completed=TRUE WHERE id=?", id);
+        fulfillBatch(List.of(id));
+    }
+
+    @Transactional
+    public void fulfillBatch(List<Long> ids) {
+        List<Long> orderedIds = ids.stream().distinct().sorted().toList();
+        if (orderedIds.isEmpty()) return;
+        String placeholders = String.join(",", Collections.nCopies(orderedIds.size(), "?"));
+        var requests = db.queryForList("SELECT id,user_id,voucher_id,state,created_at FROM tb_order_request "
+                + "WHERE id IN (" + placeholders + ") ORDER BY id FOR UPDATE", orderedIds.toArray());
+        if (requests.size() != orderedIds.size()) throw new IllegalArgumentException("Unknown order request");
+        List<Map<String,Object>> pending = requests.stream()
+                .filter(request -> !"COMPLETED".equals(request.get("state"))).toList();
+        if (pending.isEmpty()) return;
+
+        String values = String.join(",", Collections.nCopies(pending.size(), "(?,?,?)"));
+        Object[] orderArguments = new Object[pending.size() * 3];
+        List<Long> pendingIds = new java.util.ArrayList<>(pending.size());
+        for (int index = 0; index < pending.size(); index++) {
+            Map<String,Object> request = pending.get(index);
+            long id = ((Number) request.get("id")).longValue();
+            pendingIds.add(id);
+            orderArguments[index * 3] = id;
+            orderArguments[index * 3 + 1] = ((Number) request.get("user_id")).longValue();
+            orderArguments[index * 3 + 2] = ((Number) request.get("voucher_id")).longValue();
+        }
+        db.update("INSERT INTO tb_voucher_order(id,user_id,voucher_id) VALUES " + values, orderArguments);
+        String pendingPlaceholders = String.join(",", Collections.nCopies(pendingIds.size(), "?"));
+        Object[] pendingArguments = pendingIds.toArray();
+        db.update("UPDATE tb_order_request SET state='COMPLETED',updated_at=CURRENT_TIMESTAMP WHERE id IN ("
+                + pendingPlaceholders + ")", pendingArguments);
+        db.update("UPDATE tb_outbox_event SET completed=TRUE,lease_owner=NULL WHERE id IN ("
+                + pendingPlaceholders + ")", pendingArguments);
+        Instant completedAt = Instant.now();
+        for (Map<String,Object> request : pending) {
+            performance.completed(Duration.between(((Timestamp) request.get("created_at")).toInstant(), completedAt));
+        }
     }
 
     public Map<String,Object> status(long id, long userId) {
