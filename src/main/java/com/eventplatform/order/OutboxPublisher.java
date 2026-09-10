@@ -16,6 +16,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.Collections;
 import java.util.concurrent.TimeUnit;
 
 @Component
@@ -31,7 +32,7 @@ public class OutboxPublisher {
     public OutboxPublisher(
             JdbcTemplate db,
             RabbitTemplate rabbit,
-            @Value("${app.outbox.batch-size:200}") int batchSize,
+            @Value("${app.outbox.batch-size:500}") int batchSize,
             @Value("${app.outbox.lease-seconds:60}") long leaseSeconds,
             @Value("${app.outbox.confirm-timeout-seconds:5}") long confirmTimeoutSeconds) {
         this.db = db;
@@ -41,15 +42,20 @@ public class OutboxPublisher {
         this.confirmTimeoutSeconds = Math.max(1, confirmTimeoutSeconds);
     }
 
-    @Scheduled(fixedDelayString="${app.outbox.interval-ms:1000}")
+    @Scheduled(fixedDelayString="${app.outbox.interval-ms:50}")
     public void publish() {
         // Reconcile until the consumer commits, even after broker confirmation. Duplicate delivery is safe.
-        var ids = db.queryForList("SELECT id FROM tb_outbox_event WHERE completed=FALSE AND next_attempt<=CURRENT_TIMESTAMP ORDER BY next_attempt LIMIT " + batchSize, Long.class);
+        String leaseOwner = UUID.randomUUID().toString();
+        Timestamp deadline = Timestamp.from(Instant.now().plusSeconds(leaseSeconds));
+        String claimSql = "UPDATE tb_outbox_event SET lease_owner=?,next_attempt=?,attempts=attempts+1 "
+                + "WHERE completed=FALSE AND next_attempt<=CURRENT_TIMESTAMP "
+                + "ORDER BY next_attempt LIMIT " + batchSize;
+        int claimed = db.update(claimSql, leaseOwner, deadline);
+        if (claimed == 0) return;
+        var ids = db.queryForList("SELECT id FROM tb_outbox_event WHERE lease_owner=? AND completed=FALSE ORDER BY id",
+                Long.class, leaseOwner);
         List<PendingConfirm> pending = new ArrayList<>(ids.size());
         for (Long id : ids) {
-            // A database lease allows multiple app instances without holding a transaction during network I/O.
-            if (db.update("UPDATE tb_outbox_event SET next_attempt=?,attempts=attempts+1 WHERE id=? AND completed=FALSE AND next_attempt<=CURRENT_TIMESTAMP",
-                    Timestamp.from(Instant.now().plusSeconds(leaseSeconds)),id) != 1) continue;
             var correlation = new CorrelationData(UUID.randomUUID().toString());
             try {
                 rabbit.convertAndSend(QueueConfig.EXCHANGE,QueueConfig.ROUTING_KEY,id.toString(),message -> {
@@ -64,23 +70,34 @@ public class OutboxPublisher {
         }
         // Publish the entire leased batch before waiting, so broker confirms overlap instead of
         // imposing one network round-trip per event.
+        List<Long> confirmed = new ArrayList<>(pending.size());
         for (PendingConfirm item : pending) {
             try {
                 var confirm = item.correlation().getFuture().get(confirmTimeoutSeconds, TimeUnit.SECONDS);
                 CorrelationData correlation = item.correlation();
                 if (!confirm.isAck() || correlation.getReturned()!=null) throw new IllegalStateException("Broker rejected or returned order event");
-                db.update("UPDATE tb_outbox_event SET last_error=NULL WHERE id=?",item.id());
+                confirmed.add(item.id());
             } catch (Exception ex) {
                 markFailure(item.id(), ex);
             }
         }
-        Integer stale = db.queryForObject("SELECT COUNT(*) FROM tb_outbox_event WHERE completed=FALSE AND attempts>=5",Integer.class);
-        if (stale != null && stale > 0) log.warn("{} order events require attention; inspect tb_outbox_event and the failed queue",stale);
+        if (!confirmed.isEmpty()) {
+            String placeholders = String.join(",", Collections.nCopies(confirmed.size(), "?"));
+            db.update("UPDATE tb_outbox_event SET last_error=NULL WHERE lease_owner=? AND id IN (" + placeholders + ")",
+                    prepend(leaseOwner, confirmed));
+        }
+    }
+
+    private Object[] prepend(String leaseOwner, List<Long> ids) {
+        Object[] arguments = new Object[ids.size() + 1];
+        arguments[0] = leaseOwner;
+        for (int index = 0; index < ids.size(); index++) arguments[index + 1] = ids.get(index);
+        return arguments;
     }
 
     private void markFailure(long id, Exception ex) {
         if (ex instanceof InterruptedException) Thread.currentThread().interrupt();
-        db.update("UPDATE tb_outbox_event SET last_error='Publish failed; scheduled retry' WHERE id=?",id);
+        db.update("UPDATE tb_outbox_event SET last_error='Publish failed; scheduled retry',lease_owner=NULL WHERE id=?",id);
         log.warn("Order event {} pending; automatic retry in {} seconds ({})",id,leaseSeconds,ex.getClass().getSimpleName());
     }
 

@@ -20,9 +20,9 @@ public class RequestLimits {
             AuthCodes codes,
             @Value("${app.order.rate-limit.user-max:10}") int userMax,
             @Value("${app.order.rate-limit.user-window-seconds:10}") int userWindowSeconds,
-            @Value("${app.order.rate-limit.voucher-max:1000}") int voucherMax,
+            @Value("${app.order.rate-limit.voucher-max:420}") int voucherMax,
             @Value("${app.order.rate-limit.voucher-window-seconds:1}") int voucherWindowSeconds,
-            @Value("${app.order.rate-limit.global-max:3000}") int globalMax,
+            @Value("${app.order.rate-limit.global-max:800}") int globalMax,
             @Value("${app.order.rate-limit.global-window-seconds:1}") int globalWindowSeconds) {
         this.codes = codes;
         this.userMax = userMax;

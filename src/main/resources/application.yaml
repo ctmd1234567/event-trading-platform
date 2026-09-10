@@ -21,8 +21,8 @@ spring:
     username: ${MYSQL_USER:root}
     password: ${MYSQL_PASSWORD:}
     hikari:
-      maximum-pool-size: ${DB_POOL_MAX_SIZE:20}
-      minimum-idle: ${DB_POOL_MIN_IDLE:10}
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:32}
+      minimum-idle: ${DB_POOL_MIN_IDLE:16}
       connection-timeout: 3000
       validation-timeout: 1000
       max-lifetime: 1800000
@@ -65,6 +65,20 @@ spring:
       max-request-size: 3MB
   jackson:
     default-property-inclusion: non_null
+management:
+  server:
+    port: ${MANAGEMENT_PORT:8082}
+    address: ${MANAGEMENT_ADDRESS:127.0.0.1}
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  endpoint:
+    health:
+      show-details: never
+  metrics:
+    tags:
+      application: ${spring.application.name}
 mybatis-plus:
   type-aliases-package: com.eventplatform.entity
 logging:
@@ -73,6 +87,8 @@ logging:
 app:
   security:
     admin-user-ids: ${ADMIN_USER_IDS:}
+    session-ttl-seconds: ${SESSION_TTL_SECONDS:1800}
+    session-refresh-threshold-seconds: ${SESSION_REFRESH_THRESHOLD_SECONDS:900}
   upload:
     directory: ${UPLOAD_DIR:./data/images}
   sms:
@@ -80,16 +96,19 @@ app:
     endpoint: ${SMS_ENDPOINT:}
     api-key: ${SMS_API_KEY:}
   order:
+    stock-bucket-count: ${ORDER_STOCK_BUCKET_COUNT:16}
+    max-in-flight: ${ORDER_MAX_IN_FLIGHT:24}
+    admission-wait-ms: ${ORDER_ADMISSION_WAIT_MS:100}
     rate-limit:
       user-max: ${ORDER_USER_RATE_MAX:10}
       user-window-seconds: ${ORDER_USER_RATE_WINDOW_SECONDS:10}
-      voucher-max: ${ORDER_VOUCHER_RATE_MAX:1000}
+      voucher-max: ${ORDER_VOUCHER_RATE_MAX:420}
       voucher-window-seconds: ${ORDER_VOUCHER_RATE_WINDOW_SECONDS:1}
-      global-max: ${ORDER_GLOBAL_RATE_MAX:3000}
+      global-max: ${ORDER_GLOBAL_RATE_MAX:800}
       global-window-seconds: ${ORDER_GLOBAL_RATE_WINDOW_SECONDS:1}
   outbox:
     enabled: true
-    interval-ms: ${OUTBOX_INTERVAL_MS:250}
-    batch-size: ${OUTBOX_BATCH_SIZE:200}
+    interval-ms: ${OUTBOX_INTERVAL_MS:50}
+    batch-size: ${OUTBOX_BATCH_SIZE:500}
     lease-seconds: ${OUTBOX_LEASE_SECONDS:60}
     confirm-timeout-seconds: ${OUTBOX_CONFIRM_TIMEOUT_SECONDS:5}

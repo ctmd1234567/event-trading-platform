@@ -51,10 +51,11 @@ class InfrastructureIT {
         assertThat(codes.consume(phone,code)).isFalse();
         db.update("INSERT INTO tb_voucher(id,shop_id,title,pay_value,actual_value,type,status) VALUES(900001,1,'integration',1,2,1,1)");
         db.update("INSERT INTO tb_seckill_voucher(voucher_id,stock,begin_time,end_time) VALUES(900001,2,DATE_SUB(NOW(),INTERVAL 1 DAY),DATE_ADD(NOW(),INTERVAL 1 DAY))");
+        db.update("INSERT INTO tb_seckill_voucher_bucket(voucher_id,bucket_id,stock) VALUES(900001,0,1),(900001,1,1)");
         long id=orders.reserve(900001,900001);
         await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> assertThat(orders.status(id,900001)).containsEntry("state","COMPLETED"));
         orders.fulfill(id);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM tb_voucher_order WHERE id=?",Integer.class,id)).isEqualTo(1);
-        assertThat(db.queryForObject("SELECT stock FROM tb_seckill_voucher WHERE voucher_id=900001",Integer.class)).isEqualTo(1);
+        assertThat(db.queryForObject("SELECT SUM(stock) FROM tb_seckill_voucher_bucket WHERE voucher_id=900001",Integer.class)).isEqualTo(1);
     }
 }

@@ -17,12 +17,15 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 public class SecurityConfig {
     @Bean
     SecurityFilterChain security(HttpSecurity http, StringRedisTemplate redis, ObjectMapper json,
-            @Value("${app.security.admin-user-ids:}") String admins) throws Exception {
+            @Value("${app.security.admin-user-ids:}") String admins,
+            @Value("${app.security.session-ttl-seconds:1800}") int sessionTtlSeconds,
+            @Value("${app.security.session-refresh-threshold-seconds:900}") int refreshThresholdSeconds) throws Exception {
         // Explicit header tokens only; no cookie or HTTP Basic authentication.
         http.csrf(csrf -> csrf.disable()).sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .requestCache(c -> c.disable()).formLogin(c -> c.disable()).httpBasic(c -> c.disable())
             .authorizeHttpRequests(a -> a
                 .requestMatchers(HttpMethod.POST, "/user/login", "/user/code").permitAll()
+                .requestMatchers(HttpMethod.GET, "/actuator/health", "/actuator/prometheus").permitAll()
                 .requestMatchers(HttpMethod.GET, "/shop/**", "/shop-type/**", "/voucher/list/**", "/blog/hot", "/upload/images/**").permitAll()
                 .requestMatchers("/shop", "/shop/**", "/voucher", "/voucher/**", "/shop-type", "/shop-type/**").hasRole("ADMIN")
                 .anyRequest().authenticated())
@@ -35,7 +38,8 @@ public class SecurityConfig {
                     res.setStatus(403); res.setContentType("application/json;charset=UTF-8");
                 json.writeValue(res.getWriter(), Result.fail("Access denied"));
                 }))
-            .addFilterBefore(new TokenFilter(redis, admins, json), UsernamePasswordAuthenticationFilter.class);
+            .addFilterBefore(new TokenFilter(redis, admins, json, sessionTtlSeconds, refreshThresholdSeconds),
+                    UsernamePasswordAuthenticationFilter.class);
         return http.build();
     }
 }

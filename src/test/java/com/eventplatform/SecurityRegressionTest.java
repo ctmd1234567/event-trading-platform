@@ -15,7 +15,7 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.mock.web.*;
 import org.springframework.web.bind.annotation.*;
-import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import static org.assertj.core.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -28,14 +28,15 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class SecurityRegressionTest {
     @MockitoBean StringRedisTemplate redis;
     @Autowired MockMvc mvc;
-    HashOperations<String,Object,Object> hashes;
     static final String ADMIN="a".repeat(32), USER="b".repeat(32);
-    @BeforeEach @SuppressWarnings("unchecked") void setup() {
-        hashes=mock(HashOperations.class); when(redis.opsForHash()).thenReturn(hashes);
-        when(hashes.entries(anyString())).thenReturn(Map.of());
-        when(hashes.entries("login:token:"+ADMIN)).thenReturn(Map.of("id","1"));
-        when(hashes.entries("login:token:"+USER)).thenReturn(Map.of("id","2"));
-        when(redis.expire(anyString(),any(Duration.class))).thenReturn(true);
+    @BeforeEach void setup() {
+        when(redis.execute(any(org.springframework.data.redis.core.script.RedisScript.class), anyList(), any(Object[].class)))
+                .thenAnswer(invocation -> {
+                    List<String> keys=invocation.getArgument(1);
+                    if (keys.equals(List.of("login:token:"+ADMIN))) return List.of("id","1");
+                    if (keys.equals(List.of("login:token:"+USER))) return List.of("id","2");
+                    return List.of();
+                });
     }
     @RestController static class Probe {
         @GetMapping("/shop/1") String publicShop() { return "shop"; }
@@ -58,7 +59,7 @@ class SecurityRegressionTest {
         mvc.perform(get("/user/me").header("authorization","c".repeat(32))).andExpect(status().isUnauthorized());
     }
     @Test void exceptionAlsoClearsIdentity() {
-        TokenFilter filter=new TokenFilter(redis,"1",new ObjectMapper());
+        TokenFilter filter=new TokenFilter(redis,"1",new ObjectMapper(),1800,900);
         MockHttpServletRequest request=new MockHttpServletRequest();
         request.addHeader("authorization",USER);
         assertThatThrownBy(() -> filter.doFilter(request,new MockHttpServletResponse(),(req,res) -> {

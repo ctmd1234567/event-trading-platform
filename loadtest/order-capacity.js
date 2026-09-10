@@ -33,7 +33,10 @@ export const options = {
   thresholds: {
     http_req_duration: ['p(95)<1000'],
     orders_unexpected: ['count==0'],
+    orders_rate_limited: ['count==0'],
+    orders_sold_out: ['count==0'],
     dropped_iterations: ['count==0'],
+    http_req_failed: ['rate==0'],
   },
 };
 
